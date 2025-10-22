@@ -40,9 +40,9 @@ jobs:
       run: |
         mkdir build
         cd build
-        # Use test configuration for now (Metal shader compilation only)
-        echo "Using test configuration (Metal shader compilation)"
-        cp ../CMakeLists-test.txt CMakeLists.txt
+        # Use metal-only configuration (no OBS dependencies)
+        echo "Using metal-only configuration (Metal shader compilation)"
+        cp ../CMakeLists-metal-only.txt CMakeLists.txt
         cp ../equirectangular_to_fisheye.metal .
         cmake .. -DCMAKE_BUILD_TYPE=Release
         
