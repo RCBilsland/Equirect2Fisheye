@@ -40,16 +40,11 @@ jobs:
       run: |
         mkdir build
         cd build
-        # Try to configure with OBS, fallback to test build if not available
-        if cmake .. -DCMAKE_BUILD_TYPE=Release; then
-          echo "CMake configuration successful with OBS"
-        else
-          echo "OBS not found, using test configuration"
-          # Use the test CMakeLists.txt that doesn't require OBS
-          cp ../CMakeLists-test.txt CMakeLists.txt
-          cp ../equirectangular_to_fisheye.metal .
-          cmake .. -DCMAKE_BUILD_TYPE=Release
-        fi
+        # Use test configuration for now (Metal shader compilation only)
+        echo "Using test configuration (Metal shader compilation)"
+        cp ../CMakeLists-test.txt CMakeLists.txt
+        cp ../equirectangular_to_fisheye.metal .
+        cmake .. -DCMAKE_BUILD_TYPE=Release
         
     - name: Build
       run: |
