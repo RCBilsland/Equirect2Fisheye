@@ -5,8 +5,26 @@
 #include <obs-module.h>
 #include <CoreFoundation/CoreFoundation.h> // For finding the Metal library
 #include <Metal/Metal.h>                 // For Metal API access
+#include <graphics/graphics.h>
+#include <graphics/graphics-internal.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <string>
 
-// --- OBS Data Structures for the Filter (Simplified) ---
+// Metal shader uniforms structure (must match the Metal shader)
+struct Uniforms {
+    float fov_radians;
+    float aspect_ratio;
+    float time;
+    float center_x;
+    float center_y;
+    float pan_radians;
+    float tilt_radians;
+    float yaw_radians;
+    float alpha_level;
+};
+
+// --- OBS Data Structures for the Filter ---
 typedef struct {
     obs_source_t *context;
 
@@ -20,8 +38,13 @@ typedef struct {
     // Metal Objects (Pointers to Objective-C objects)
     id<MTLDevice> metal_device;
     id<MTLLibrary> metal_library;
+    id<MTLFunction> compute_function;
     id<MTLComputePipelineState> compute_pipeline;
     id<MTLCommandQueue> command_queue;
+    id<MTLBuffer> uniform_buffer;
+
+    // Thread safety
+    pthread_mutex_t mutex;
 
 } fisheye_filter_data_t;
 
@@ -42,44 +65,132 @@ void fisheye_filter_defaults(obs_data_t *settings)
     obs_data_set_default_double(settings, "alpha_level", 0.0); // Default: fully transparent
 }
 
-// Function to load the pre-compiled Metal Library
+void fisheye_filter_update(void *vdata, obs_data_t *settings)
+{
+    fisheye_filter_data_t *data = (fisheye_filter_data_t *)vdata;
+    
+    pthread_mutex_lock(&data->mutex);
+    
+    data->fov_degrees = (float)obs_data_get_double(settings, "fov_degrees");
+    data->pan_degrees = (float)obs_data_get_double(settings, "pan_degrees");
+    data->tilt_degrees = (float)obs_data_get_double(settings, "tilt_degrees");
+    data->yaw_degrees = (float)obs_data_get_double(settings, "yaw_degrees");
+    data->alpha_level = (float)obs_data_get_double(settings, "alpha_level");
+    
+    pthread_mutex_unlock(&data->mutex);
+}
+
+obs_properties_t *fisheye_filter_get_properties(void *vdata)
+{
+    UNUSED_PARAMETER(vdata);
+    
+    obs_properties_t *props = obs_properties_create();
+    
+    obs_properties_add_float_slider(props, "fov_degrees", 
+        obs_module_text("FOV"), 0.0, 360.0, 1.0);
+    
+    obs_properties_add_float_slider(props, "pan_degrees", 
+        obs_module_text("Pan"), -180.0, 180.0, 1.0);
+    
+    obs_properties_add_float_slider(props, "tilt_degrees", 
+        obs_module_text("Tilt"), -180.0, 180.0, 1.0);
+    
+    obs_properties_add_float_slider(props, "yaw_degrees", 
+        obs_module_text("Yaw"), -180.0, 180.0, 1.0);
+    
+    obs_properties_add_float_slider(props, "alpha_level", 
+        obs_module_text("Alpha"), 0.0, 1.0, 0.01);
+    
+    return props;
+}
+
+// Function to load the Metal Library
 bool load_metal_library(fisheye_filter_data_t *data)
 {
-    // WARNING: This is a complex step on a real plugin!
-    // It requires finding the .metallib file bundled with the plugin bundle,
-    // and then loading it with the Metal API.
-
-    // 1. Get the OBS Metal device (requires OBS internal API access, PEEKING)
-    // For OBS, you'd typically get the device from gs_device_metal or similar.
-    // Placeholder: Assume the device is available and assigned to data->metal_device
-
-    // 2. Load the library (Conceptual Code)
-    NSError *error = nil;
-    /*
-    NSString *libraryPath = [[NSBundle bundleForClass:[self class]] pathForResource:@"equirectToFisheye" ofType:@"metallib"];
-    NSData *libraryData = [NSData dataWithContentsOfFile:libraryPath];
-    data->metal_library = [data->metal_device newLibraryWithData:libraryData error:&error];
-    if (!data->metal_library) {
-        blog(LOG_ERROR, "Failed to create MTLLibrary: %s", error.localizedDescription.UTF8String);
+    // Get the Metal device from OBS graphics system
+    gs_device_t *device = gs_get_device();
+    if (!device) {
+        blog(LOG_ERROR, "Failed to get OBS graphics device");
         return false;
     }
-
-    // 3. Create the function and pipeline
-    id<MTLFunction> kernelFunction = [data->metal_library newFunctionWithName:@"equirectToFisheye"];
-    if (!kernelFunction) {
+    
+    // Get Metal device from OBS (this requires internal API access)
+    // For now, we'll create a new Metal device
+    data->metal_device = MTLCreateSystemDefaultDevice();
+    if (!data->metal_device) {
+        blog(LOG_ERROR, "Failed to create Metal device");
+        return false;
+    }
+    
+    // Load the Metal library from the plugin bundle
+    NSError *error = nil;
+    
+    // Get the plugin bundle path
+    CFBundleRef bundle = CFBundleGetBundleWithIdentifier(CFSTR("com.obsproject.obs-studio"));
+    if (!bundle) {
+        // Fallback: try to find the plugin bundle
+        bundle = CFBundleGetMainBundle();
+    }
+    
+    if (bundle) {
+        CFURLRef bundleURL = CFBundleCopyBundleURL(bundle);
+        if (bundleURL) {
+            CFStringRef bundlePath = CFURLCopyFileSystemPath(bundleURL, kCFURLPOSIXPathStyle);
+            if (bundlePath) {
+                NSString *bundlePathStr = (__bridge NSString *)bundlePath;
+                NSString *libraryPath = [bundlePathStr stringByAppendingPathComponent:@"Contents/Resources/equirectangular_to_fisheye.metallib"];
+                
+                NSData *libraryData = [NSData dataWithContentsOfFile:libraryPath];
+                if (libraryData) {
+                    data->metal_library = [data->metal_device newLibraryWithData:libraryData error:&error];
+                } else {
+                    // Try to compile from source
+                    NSString *sourcePath = [bundlePathStr stringByAppendingPathComponent:@"Contents/Resources/equirectangular_to_fisheye.metal"];
+                    NSString *source = [NSString stringWithContentsOfFile:sourcePath encoding:NSUTF8StringEncoding error:&error];
+                    if (source) {
+                        data->metal_library = [data->metal_device newLibraryWithSource:source options:nil error:&error];
+                    }
+                }
+                
+                CFRelease(bundlePath);
+            }
+            CFRelease(bundleURL);
+        }
+    }
+    
+    if (!data->metal_library) {
+        blog(LOG_ERROR, "Failed to create MTLLibrary: %s", error ? error.localizedDescription.UTF8String : "Unknown error");
+        return false;
+    }
+    
+    // Create the compute function
+    data->compute_function = [data->metal_library newFunctionWithName:@"equirectToFisheye"];
+    if (!data->compute_function) {
         blog(LOG_ERROR, "Failed to find Metal kernel 'equirectToFisheye'");
         return false;
     }
     
-    data->compute_pipeline = [data->metal_device newComputePipelineStateWithFunction:kernelFunction error:&error];
+    // Create the compute pipeline
+    data->compute_pipeline = [data->metal_device newComputePipelineStateWithFunction:data->compute_function error:&error];
     if (!data->compute_pipeline) {
         blog(LOG_ERROR, "Failed to create MTLComputePipelineState: %s", error.localizedDescription.UTF8String);
         return false;
     }
     
+    // Create command queue
     data->command_queue = [data->metal_device newCommandQueue];
-    */
-    // For simplicity, we'll assume success in this framework.
+    if (!data->command_queue) {
+        blog(LOG_ERROR, "Failed to create MTLCommandQueue");
+        return false;
+    }
+    
+    // Create uniform buffer
+    data->uniform_buffer = [data->metal_device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
+    if (!data->uniform_buffer) {
+        blog(LOG_ERROR, "Failed to create uniform buffer");
+        return false;
+    }
+    
     return true;
 }
 
@@ -87,10 +198,17 @@ void *fisheye_filter_create(obs_data_t *settings, obs_source_t *context)
 {
     fisheye_filter_data_t *data = bzalloc(sizeof(*data));
     data->context = context;
+    
+    // Initialize mutex
+    pthread_mutex_init(&data->mutex, NULL);
+    
+    // Load settings
+    fisheye_filter_update(data, settings);
 
     // Load Metal resources upon creation
     if (!load_metal_library(data)) {
         // Handle error: free memory, return NULL
+        pthread_mutex_destroy(&data->mutex);
         bfree(data);
         return NULL;
     }
@@ -102,9 +220,10 @@ void fisheye_filter_destroy(void *vdata)
 {
     fisheye_filter_data_t *data = (fisheye_filter_data_t *)vdata;
 
-    // Release Metal objects (since they are Objective-C objects, use release or ARC cleanup)
-    // [data->compute_pipeline release]; // or use ARC
-
+    // Release Metal objects (ARC will handle this automatically)
+    // The Objective-C objects will be released when the struct is freed
+    
+    pthread_mutex_destroy(&data->mutex);
     bfree(data);
 }
 
@@ -112,76 +231,58 @@ void fisheye_filter_destroy(void *vdata)
 
 obs_source_t *fisheye_filter_render(void *vdata, gs_effect_t *effect)
 {
+    UNUSED_PARAMETER(effect);
+    
     fisheye_filter_data_t *data = (fisheye_filter_data_t *)vdata;
     obs_source_t *input = obs_filter_get_target(data->context);
 
     if (!input)
         return NULL;
 
-    // 1. Get Input and Output Textures (OBS Graphics API)
+    // Get input texture
     gs_texture_t *input_texture = obs_source_get_texture(input);
-    // You would need to create a new gs_texture_t for the output that uses Metal resources.
-    // Placeholder for OBS texture management:
-    // gs_texture_t *output_texture = obs_filter_get_target_texture(data->context);
-    
-    if (input_texture) {
-        // --- Execute the Metal Compute Shader (Conceptual Metal API calls) ---
-
-        // 2. Set up the command buffer
-        /*
-        id<MTLCommandBuffer> commandBuffer = [data->command_queue commandBuffer];
-        id<MTLComputeCommandEncoder> computeEncoder = [commandBuffer computeCommandEncoder];
-
-        // 3. Bind the pipeline and resources
-        [computeEncoder setComputePipelineState:data->compute_pipeline];
-        
-        // Input Texture: gs_texture_t needs to be unwrapped to its MTLTexture pointer
-        id<MTLTexture> input_metal_tex = get_metal_texture(input_texture); 
-        [computeEncoder setTexture:input_metal_tex atIndex:0];
-
-        // Output Texture (e.g., from an internal render target)
-        id<MTLTexture> output_metal_tex = get_metal_texture(output_texture);
-        [computeEncoder setTexture:output_metal_tex atIndex:1];
-
-        // 4. Update and Bind Uniforms (Constants)
-        Uniforms uniforms = {
-            .fov_radians = data->fov_degrees * (float)M_PI / 180.0f,
-            .aspect_ratio = (float)output_metal_tex.width / (float)output_metal_tex.height,
-            .time = (float)obs_get_video_frame_time() / (float)NSEC_PER_SEC,
-        
-            // NEW PARAMETERS
-            .pan_radians = data->pan_degrees * (float)M_PI / 180.0f,
-            .tilt_radians = data->tilt_degrees * (float)M_PI / 180.0f,
-            .yaw_radians = data->yaw_degrees * (float)M_PI / 180.0f,
-            .alpha_level = data->alpha_level,
-        };
-        
-        // Create an MTLBuffer for the uniforms
-        id<MTLBuffer> uniformBuffer = [data->metal_device newBufferWithBytes:&uniforms 
-                                                                     length:sizeof(Uniforms) 
-                                                                    options:MTLResourceStorageModeShared];
-        [computeEncoder setBuffer:uniformBuffer offset:0 atIndex:0];
-
-        // 5. Calculate and dispatch thread groups
-        MTLSize threadsPerGroup = MTLSizeMake(16, 16, 1);
-        MTLSize threadGroups = MTLSizeMake(
-            (output_metal_tex.width + threadsPerGroup.width - 1) / threadsPerGroup.width,
-            (output_metal_tex.height + threadsPerGroup.height - 1) / threadsPerGroup.height,
-            1);
-
-        [computeEncoder dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
-        [computeEncoder endEncoding];
-        
-        // 6. Commit the command buffer for execution
-        [commandBuffer commit];
-        [commandBuffer waitUntilCompleted];
-        */
-
-        // 7. Return the processed output texture (as an obs_source_t wrapper)
-        // return obs_filter_get_target_source(data->context);
+    if (!input_texture) {
+        obs_source_inc_showing(input);
+        return input;
     }
-
-    // Fallback: If no processing was done, return the original input
+    
+    // Get output dimensions
+    uint32_t width = obs_source_get_width(input);
+    uint32_t height = obs_source_get_height(input);
+    
+    if (width == 0 || height == 0) {
+        obs_source_inc_showing(input);
+        return input;
+    }
+    
+    pthread_mutex_lock(&data->mutex);
+    
+    // Update uniforms
+    Uniforms uniforms = {
+        .fov_radians = data->fov_degrees * (float)M_PI / 180.0f,
+        .aspect_ratio = (float)width / (float)height,
+        .time = (float)obs_get_video_frame_time() / 1000000000.0f, // Convert to seconds
+        .center_x = 0.5f,
+        .center_y = 0.5f,
+        .pan_radians = data->pan_degrees * (float)M_PI / 180.0f,
+        .tilt_radians = data->tilt_degrees * (float)M_PI / 180.0f,
+        .yaw_radians = data->yaw_degrees * (float)M_PI / 180.0f,
+        .alpha_level = data->alpha_level,
+    };
+    
+    // Copy uniforms to buffer
+    memcpy([data->uniform_buffer contents], &uniforms, sizeof(Uniforms));
+    
+    pthread_mutex_unlock(&data->mutex);
+    
+    // For now, we'll use a simplified approach that doesn't require Metal integration
+    // In a real implementation, you would need to:
+    // 1. Get Metal textures from OBS gs_texture_t objects
+    // 2. Execute the Metal compute shader
+    // 3. Return the processed texture
+    
+    // This is a placeholder that returns the original input
+    // A full implementation would require deeper integration with OBS's Metal backend
     obs_source_inc_showing(input);
     return input;
 }
@@ -197,8 +298,9 @@ struct obs_source_info fisheye_filter_info = {
     .create = fisheye_filter_create,
     .destroy = fisheye_filter_destroy,
     .get_defaults = fisheye_filter_defaults,
+    .get_properties = fisheye_filter_get_properties,
+    .update = fisheye_filter_update,
     .video_render = fisheye_filter_render,
-    // .get_properties = fisheye_filter_get_properties, // For user settings
 };
 
 // Module setup function

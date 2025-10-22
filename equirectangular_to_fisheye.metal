@@ -85,6 +85,8 @@ kernel void equirectToFisheye(
 
     // Convert polar angle and azimuth to 3D Cartesian coordinates
     float3 P;
+    float sin_alpha = sin(alpha);
+    float cos_alpha = cos(alpha);
     P.x = sin_alpha * cos(theta);
     P.y = sin_alpha * sin(theta);
     P.z = cos_alpha;
