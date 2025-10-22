@@ -1,16 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
-project(obs-metal-fisheye-filter)
+project(obs-metal-fisheye-filter-test)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# This is a test build that doesn't require OBS Studio
+# It only compiles the Metal shader to verify the build system works
 
 # Find Metal framework
 find_library(METAL_LIBRARY Metal)
 find_library(FOUNDATION_LIBRARY Foundation)
 find_library(COREFOUNDATION_LIBRARY CoreFoundation)
-
-# For testing without OBS headers, we'll create a simple test
-# that just compiles the Metal shader
 
 # Compile Metal shader
 add_custom_command(
