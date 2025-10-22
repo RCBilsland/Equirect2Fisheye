@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.16)
+project(obs-metal-fisheye-filter)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Find Metal framework
+find_library(METAL_LIBRARY Metal)
+find_library(FOUNDATION_LIBRARY Foundation)
+find_library(COREFOUNDATION_LIBRARY CoreFoundation)
+
+# For testing without OBS headers, we'll create a simple test
+# that just compiles the Metal shader
+
+# Compile Metal shader
+add_custom_command(
+    OUTPUT equirectangular_to_fisheye.metallib
+    COMMAND xcrun -sdk macosx metal -c equirectangular_to_fisheye.metal -o equirectangular_to_fisheye.air
+    COMMAND xcrun -sdk macosx metallib equirectangular_to_fisheye.air -o equirectangular_to_fisheye.metallib
+    DEPENDS equirectangular_to_fisheye.metal
+    COMMENT "Compiling Metal shader"
+)
+
+# Create a simple test target
+add_custom_target(metal_shader_test ALL DEPENDS equirectangular_to_fisheye.metallib)
+
+# Test that the Metal library compiles correctly
+add_custom_command(
+    OUTPUT test_metal_compile
+    COMMAND xcrun -sdk macosx metal -c equirectangular_to_fisheye.metal -o test_metal.air
+    COMMAND echo "Metal shader compilation successful" > test_metal_compile
+    DEPENDS equirectangular_to_fisheye.metal
+    COMMENT "Testing Metal shader compilation"
+)
+
+add_custom_target(test_compile ALL DEPENDS test_metal_compile)
+
+# Clean up test files
+add_custom_command(
+    OUTPUT clean_test
+    COMMAND rm -f test_metal.air test_metal_compile
+    COMMENT "Cleaning up test files"
+)
+
+add_custom_target(clean_test_files ALL DEPENDS clean_test)
