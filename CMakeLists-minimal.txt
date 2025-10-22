@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(minimal-test)
+
+# Minimal test - just compile Metal shader
+add_custom_command(
+    OUTPUT test.metallib
+    COMMAND xcrun -sdk macosx metal -c equirectangular_to_fisheye.metal -o test.air
+    COMMAND xcrun -sdk macosx metallib test.air -o test.metallib
+    DEPENDS equirectangular_to_fisheye.metal
+    COMMENT "Compiling Metal shader"
+)
+
+add_custom_target(test_target ALL DEPENDS test.metallib)

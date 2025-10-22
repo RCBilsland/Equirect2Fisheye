@@ -42,9 +42,9 @@ jobs:
         rm -rf build
         mkdir build
         cd build
-        # Use metal-only configuration (no OBS dependencies)
-        echo "Using metal-only configuration (Metal shader compilation)"
-        cp ../CMakeLists-metal-only.txt CMakeLists.txt
+        # Use minimal configuration (no OBS dependencies)
+        echo "Using minimal configuration (Metal shader compilation)"
+        cp ../CMakeLists-minimal.txt CMakeLists.txt
         cp ../equirectangular_to_fisheye.metal .
         cmake .. -DCMAKE_BUILD_TYPE=Release
         
